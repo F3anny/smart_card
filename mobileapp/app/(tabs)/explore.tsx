@@ -1,0 +1,720 @@
+import RFIDCard from '@/components/rfid-card';
+import { APP_CONFIG } from '@/config/app-config';
+import { useApp } from '@/context/AppContext';
+import socketService from '@/services/socket';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
+import React, { useEffect, useState } from 'react';
+import {
+    Alert,
+    Image,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from 'react-native';
+
+export default function ShopScreen() {
+    const router = useRouter();
+    const { user, currentCard, products, isConnected, transactions, fetchTransactionHistory } = useApp();
+    const [cart, setCart] = useState<Array<{ product: any; quantity: number }>>([]);
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        if (user?.role === 'admin') {
+            router.replace('/(tabs)/main');
+        }
+    }, [user]);
+
+    // Fetch transaction history when card is scanned
+    useEffect(() => {
+        if (currentCard?.uid) {
+            fetchTransactionHistory(currentCard.uid);
+        }
+    }, [currentCard?.uid]);
+
+    const simulateCardScan = () => {
+        const mockUID = `CARD-${Math.random().toString(36).substring(2, 11).toUpperCase()}`;
+        socketService.emit('card-scanned', { uid: mockUID });
+    };
+
+    if (user?.role !== 'cashier') {
+        return null;
+    }
+
+    const addToCart = (product: any) => {
+        const existingItem = cart.find(item => item.product._id === product._id);
+        if (existingItem) {
+            setCart(cart.map(item =>
+                item.product._id === product._id
+                    ? { ...item, quantity: item.quantity + 1 }
+                    : item
+            ));
+        } else {
+            setCart([...cart, { product, quantity: 1 }]);
+        }
+    };
+
+    const removeFromCart = (productId: string) => {
+        setCart(cart.filter(item => item.product._id !== productId));
+    };
+
+    const updateQuantity = (productId: string, newQuantity: number) => {
+        if (newQuantity <= 0) {
+            removeFromCart(productId);
+        } else {
+            setCart(cart.map(item =>
+                item.product._id === productId
+                    ? { ...item, quantity: newQuantity }
+                    : item
+            ));
+        }
+    };
+
+    const getTotalAmount = () => {
+        return cart.reduce((sum, item) => sum + (item.product.price * item.quantity), 0);
+    };
+
+    const handleCheckout = async () => {
+        if (!currentCard?.uid) {
+            Alert.alert('Card Required', 'Please scan a card before checkout');
+            return;
+        }
+
+        if (cart.length === 0) {
+            Alert.alert('Cart Empty', 'Please add items to cart');
+            return;
+        }
+
+        const totalAmount = getTotalAmount();
+        if (totalAmount > currentCard.balance) {
+            Alert.alert('Insufficient Balance', `Balance: ${currentCard.balance.toFixed(2)}\nTotal: ${totalAmount.toFixed(2)}`);
+            return;
+        }
+
+        setLoading(true);
+        try {
+            const response = await fetch(`${APP_CONFIG.SERVER_URL}${APP_CONFIG.ENDPOINTS.PAYMENT}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    uid: currentCard.uid,
+                    items: cart.map(item => ({
+                        productId: item.product._id,
+                        quantity: item.quantity,
+                        price: item.product.price,
+                    })),
+                    totalAmount: totalAmount,
+                }),
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                Alert.alert('Payment Success', `Paid ${totalAmount.toFixed(2)}\nNew balance: ${result.newBalance.toFixed(2)}`);
+                setCart([]);
+            } else {
+                Alert.alert('Payment Failed', result.error || 'Unable to process payment');
+            }
+        } catch (error: any) {
+            Alert.alert('Connection Error', error.message || 'Cannot reach server');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <View style={styles.container}>
+            <View style={styles.header}>
+                <View style={styles.headerRow}>
+                    <View>
+                        <Text style={styles.title}>Shop</Text>
+                        <Text style={styles.subtitle}>Browse & Buy Products</Text>
+                    </View>
+                    <View style={[styles.statusBadge, isConnected && styles.statusOnline]}>
+                        <View style={[styles.statusDot, isConnected && styles.statusDotOnline]} />
+                        <Text style={styles.statusText}>{isConnected ? 'Online' : 'Offline'}</Text>
+                    </View>
+                </View>
+            </View>
+
+            <View style={styles.balanceCard}>
+                {!currentCard ? (
+                    <View style={styles.noCard}>
+                        <Ionicons name="card-outline" size={48} color="#666666" />
+                        <Text style={styles.noCardText}>No Card Detected</Text>
+                        <Text style={styles.noCardHint}>Scan card to checkout</Text>
+                        <TouchableOpacity style={styles.scanButton} onPress={simulateCardScan}>
+                            <Ionicons name="scan" size={20} color="#0A0A0A" style={{ marginRight: 8 }} />
+                            <Text style={styles.scanButtonText}>Scan Card</Text>
+                        </TouchableOpacity>
+                    </View>
+                ) : (
+                    <RFIDCard
+                        uid={currentCard.uid}
+                        balance={currentCard.balance}
+                        status={currentCard.status}
+                    />
+                )}
+            </View>
+
+            <View style={styles.mainContent}>
+                <View style={styles.section}>
+                    <View style={styles.sectionHeader}>
+                        <MaterialCommunityIcons name="shopping" size={20} color="#00D9FF" />
+                        <Text style={styles.sectionTitle}>Products</Text>
+                    </View>
+                    <ScrollView style={styles.list} showsVerticalScrollIndicator={false}>
+                        {products.length === 0 ? (
+                            <Text style={styles.emptyText}>No products available</Text>
+                        ) : (
+                            products.map((product: any) => (
+                                <TouchableOpacity
+                                    key={product._id}
+                                    style={styles.productCard}
+                                    onPress={() => addToCart(product)}
+                                >
+                                    {product.image ? (
+                                        <Image
+                                            source={{ uri: product.image }}
+                                            style={styles.productImage}
+                                            resizeMode="cover"
+                                        />
+                                    ) : (
+                                        <View style={styles.productIcon}>
+                                            <Text style={styles.productEmoji}>{product.icon || '📦'}</Text>
+                                        </View>
+                                    )}
+                                    <View style={styles.productInfo}>
+                                        <Text style={styles.productName}>{product.name}</Text>
+                                        {product.description && (
+                                            <Text style={styles.productDescription}>{product.description}</Text>
+                                        )}
+                                        <Text style={styles.productPrice}>${product.price.toFixed(2)}</Text>
+                                    </View>
+                                    <View style={styles.addButton}>
+                                        <Text style={styles.addButtonText}>+</Text>
+                                    </View>
+                                </TouchableOpacity>
+                            ))
+                        )}
+                    </ScrollView>
+                </View>
+
+                <View style={styles.section}>
+                    <View style={styles.sectionHeader}>
+                        <Ionicons name="cart" size={20} color="#00D9FF" />
+                        <Text style={styles.sectionTitle}>Cart</Text>
+                        {cart.length > 0 && (
+                            <View style={styles.cartBadge}>
+                                <Text style={styles.cartBadgeText}>{cart.length}</Text>
+                            </View>
+                        )}
+                    </View>
+                    <ScrollView
+                        style={styles.list}
+                        contentContainerStyle={styles.listContent}
+                        showsVerticalScrollIndicator={false}
+                    >
+                        {cart.length === 0 ? (
+                            <Text style={styles.emptyText}>Cart is empty</Text>
+                        ) : (
+                            cart.map((item) => (
+                                <View key={item.product._id} style={styles.cartItem}>
+                                    <View style={styles.cartItemHeader}>
+                                        {item.product.image ? (
+                                            <Image
+                                                source={{ uri: item.product.image }}
+                                                style={styles.cartItemImage}
+                                                resizeMode="cover"
+                                            />
+                                        ) : (
+                                            <Text style={styles.cartItemEmoji}>{item.product.icon || '📦'}</Text>
+                                        )}
+                                        <Text style={styles.cartItemName}>{item.product.name}</Text>
+                                    </View>
+                                    <Text style={styles.cartItemPrice}>${item.product.price.toFixed(2)} × {item.quantity}</Text>
+                                    <View style={styles.cartItemActions}>
+                                        <TouchableOpacity
+                                            style={styles.quantityButton}
+                                            onPress={() => updateQuantity(item.product._id, item.quantity - 1)}
+                                        >
+                                            <Text style={styles.quantityButtonText}>−</Text>
+                                        </TouchableOpacity>
+                                        <Text style={styles.quantityText}>{item.quantity}</Text>
+                                        <TouchableOpacity
+                                            style={styles.quantityButton}
+                                            onPress={() => updateQuantity(item.product._id, item.quantity + 1)}
+                                        >
+                                            <Text style={styles.quantityButtonText}>+</Text>
+                                        </TouchableOpacity>
+                                        <TouchableOpacity
+                                            style={styles.removeButton}
+                                            onPress={() => removeFromCart(item.product._id)}
+                                        >
+                                            <Text style={styles.removeButtonText}>×</Text>
+                                        </TouchableOpacity>
+                                    </View>
+                                    <Text style={styles.cartItemTotal}>${(item.product.price * item.quantity).toFixed(2)}</Text>
+                                </View>
+                            ))
+                        )}
+                    </ScrollView>
+
+                    {cart.length > 0 && (
+                        <View style={styles.checkoutSection}>
+                            {!currentCard && (
+                                <View style={styles.cardWarning}>
+                                    <Ionicons name="warning" size={16} color="#FFA500" />
+                                    <Text style={styles.cardWarningText}>Scan card to checkout</Text>
+                                </View>
+                            )}
+                            <View style={styles.totalRow}>
+                                <Text style={styles.totalLabel}>Total:</Text>
+                                <Text style={styles.totalAmount}>${getTotalAmount().toFixed(2)}</Text>
+                            </View>
+                            {currentCard && (
+                                <View style={styles.balanceInfo}>
+                                    <Text style={styles.balanceInfoLabel}>Card Balance:</Text>
+                                    <Text style={[
+                                        styles.balanceInfoValue,
+                                        getTotalAmount() > currentCard.balance && styles.balanceInfoInsufficient
+                                    ]}>
+                                        ${currentCard.balance.toFixed(2)}
+                                    </Text>
+                                </View>
+                            )}
+                            {currentCard && (
+                                <TouchableOpacity
+                                    style={[
+                                        styles.payButton,
+                                        loading && styles.buttonDisabled
+                                    ]}
+                                    onPress={handleCheckout}
+                                    disabled={loading}
+                                >
+                                    <Ionicons
+                                        name={loading ? "hourglass-outline" : "card"}
+                                        size={24}
+                                        color="#0A0A0A"
+                                        style={{ marginRight: 8 }}
+                                    />
+                                    <Text style={styles.payButtonText}>
+                                        {loading ? 'PROCESSING...' : 'PAY'}
+                                    </Text>
+                                </TouchableOpacity>
+                            )}
+                            {!currentCard && (
+                                <View style={styles.scanCardPrompt}>
+                                    <Ionicons name="scan" size={20} color="#666666" />
+                                    <Text style={styles.scanCardPromptText}>Scan card to enable payment</Text>
+                                </View>
+                            )}
+                        </View>
+                    )}
+                </View>
+            </View>
+        </View>
+    );
+}
+
+const styles = StyleSheet.create({
+    container: {
+        flex: 1,
+        backgroundColor: '#0A0A0A',
+    },
+    header: {
+        backgroundColor: '#1A1A1A',
+        padding: 20,
+        paddingTop: 60,
+        borderBottomWidth: 1,
+        borderBottomColor: '#2A2A2A',
+    },
+    headerRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+    },
+    title: {
+        fontSize: 28,
+        fontWeight: '700',
+        color: '#FFFFFF',
+        marginBottom: 4,
+    },
+    subtitle: {
+        fontSize: 14,
+        color: '#888888',
+    },
+    statusBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        backgroundColor: '#2A2A2A',
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: '#FF4444',
+    },
+    statusOnline: {
+        borderColor: '#00D9FF',
+    },
+    statusDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        backgroundColor: '#FF4444',
+        marginRight: 8,
+    },
+    statusDotOnline: {
+        backgroundColor: '#00D9FF',
+    },
+    statusText: {
+        fontSize: 12,
+        fontWeight: '600',
+        color: '#FFFFFF',
+    },
+    balanceCard: {
+        backgroundColor: '#1A1A1A',
+        margin: 20,
+        padding: 20,
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: '#2A2A2A',
+        alignItems: 'center',
+    },
+    noCard: {
+        alignItems: 'center',
+        paddingVertical: 20,
+        gap: 8,
+    },
+    noCardText: {
+        fontSize: 16,
+        color: '#888888',
+        fontWeight: '600',
+    },
+    noCardHint: {
+        fontSize: 13,
+        color: '#666666',
+    },
+    scanButton: {
+        backgroundColor: '#00D9FF',
+        paddingHorizontal: 24,
+        paddingVertical: 12,
+        borderRadius: 12,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginTop: 8,
+    },
+    scanButtonText: {
+        color: '#0A0A0A',
+        fontSize: 14,
+        fontWeight: '700',
+    },
+    mainContent: {
+        flex: 1,
+        flexDirection: 'row',
+        paddingHorizontal: 20,
+        gap: 16,
+    },
+    section: {
+        flex: 1,
+        paddingBottom: 100, // Add padding to prevent content from hiding behind nav tab
+    },
+    sectionHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginBottom: 16,
+        gap: 8,
+    },
+    sectionTitle: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: '#FFFFFF',
+    },
+    list: {
+        flex: 1,
+    },
+    listContent: {
+        paddingBottom: 20, // Extra padding for scroll content
+    },
+    emptyText: {
+        textAlign: 'center',
+        color: '#666666',
+        marginTop: 40,
+    },
+    productCard: {
+        backgroundColor: '#1A1A1A',
+        borderWidth: 1,
+        borderColor: '#2A2A2A',
+        borderRadius: 12,
+        padding: 12,
+        marginBottom: 12,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+    },
+    productImage: {
+        width: 64,
+        height: 64,
+        borderRadius: 8,
+        backgroundColor: '#0A0A0A',
+    },
+    productIcon: {
+        width: 64,
+        height: 64,
+        backgroundColor: '#0A0A0A',
+        borderRadius: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    productEmoji: {
+        fontSize: 32,
+    },
+    productInfo: {
+        flex: 1,
+    },
+    productName: {
+        fontSize: 16,
+        fontWeight: '600',
+        color: '#FFFFFF',
+        marginBottom: 2,
+    },
+    productDescription: {
+        fontSize: 12,
+        color: '#666666',
+        marginBottom: 4,
+    },
+    productPrice: {
+        fontSize: 14,
+        color: '#00D9FF',
+        fontWeight: '700',
+    },
+    addButton: {
+        width: 36,
+        height: 36,
+        backgroundColor: '#00D9FF',
+        borderRadius: 18,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    addButtonText: {
+        color: '#0A0A0A',
+        fontSize: 24,
+        fontWeight: '700',
+    },
+    cartBadge: {
+        backgroundColor: '#00D9FF',
+        width: 24,
+        height: 24,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginLeft: 8,
+    },
+    cartBadgeText: {
+        color: '#0A0A0A',
+        fontSize: 12,
+        fontWeight: '700',
+    },
+    cartItem: {
+        backgroundColor: '#1A1A1A',
+        borderWidth: 1,
+        borderColor: '#2A2A2A',
+        borderRadius: 12,
+        padding: 16,
+        marginBottom: 12,
+    },
+    cartItemHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        marginBottom: 8,
+    },
+    cartItemImage: {
+        width: 32,
+        height: 32,
+        borderRadius: 6,
+        backgroundColor: '#0A0A0A',
+    },
+    cartItemEmoji: {
+        fontSize: 20,
+    },
+    cartItemName: {
+        fontSize: 14,
+        fontWeight: '600',
+        color: '#FFFFFF',
+        flex: 1,
+    },
+    cartItemPrice: {
+        fontSize: 12,
+        color: '#888888',
+        marginBottom: 12,
+    },
+    cartItemActions: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginBottom: 12,
+    },
+    quantityButton: {
+        width: 32,
+        height: 32,
+        backgroundColor: '#0A0A0A',
+        borderWidth: 1,
+        borderColor: '#2A2A2A',
+        borderRadius: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    quantityButtonText: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: '#00D9FF',
+    },
+    quantityText: {
+        fontSize: 16,
+        fontWeight: '700',
+        color: '#FFFFFF',
+        marginHorizontal: 16,
+        minWidth: 24,
+        textAlign: 'center',
+    },
+    removeButton: {
+        marginLeft: 'auto',
+        width: 32,
+        height: 32,
+        backgroundColor: '#0A0A0A',
+        borderWidth: 1,
+        borderColor: '#2A2A2A',
+        borderRadius: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    removeButtonText: {
+        fontSize: 24,
+        color: '#FF4444',
+        fontWeight: '700',
+    },
+    cartItemTotal: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: '#00D9FF',
+        textAlign: 'right',
+    },
+    checkoutSection: {
+        marginTop: 16,
+        paddingTop: 16,
+        paddingBottom: 20,
+        borderTopWidth: 2,
+        borderTopColor: '#00D9FF',
+        backgroundColor: '#1A1A1A',
+        borderRadius: 12,
+        padding: 16,
+    },
+    cardWarning: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        backgroundColor: '#2A2A2A',
+        padding: 12,
+        borderRadius: 8,
+        marginBottom: 12,
+    },
+    cardWarningText: {
+        fontSize: 13,
+        color: '#FFA500',
+        fontWeight: '600',
+    },
+    totalRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 16,
+    },
+    totalLabel: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: '#FFFFFF',
+    },
+    totalAmount: {
+        fontSize: 28,
+        fontWeight: '700',
+        color: '#00D9FF',
+    },
+    checkoutButton: {
+        backgroundColor: '#00D9FF',
+        paddingVertical: 16,
+        borderRadius: 12,
+        alignItems: 'center',
+        flexDirection: 'row',
+        justifyContent: 'center',
+    },
+    buttonDisabled: {
+        opacity: 0.5,
+    },
+    checkoutButtonText: {
+        color: '#0A0A0A',
+        fontSize: 16,
+        fontWeight: '700',
+    },
+    payButton: {
+        backgroundColor: '#00D9FF',
+        paddingVertical: 20,
+        borderRadius: 12,
+        alignItems: 'center',
+        flexDirection: 'row',
+        justifyContent: 'center',
+        shadowColor: '#00D9FF',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 8,
+        elevation: 8,
+    },
+    payButtonText: {
+        color: '#0A0A0A',
+        fontSize: 20,
+        fontWeight: '700',
+        letterSpacing: 2,
+    },
+    scanCardPrompt: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+        backgroundColor: '#1A1A1A',
+        paddingVertical: 20,
+        borderRadius: 12,
+        borderWidth: 2,
+        borderColor: '#2A2A2A',
+        borderStyle: 'dashed',
+    },
+    scanCardPromptText: {
+        fontSize: 14,
+        color: '#666666',
+        fontWeight: '600',
+    },
+    balanceInfo: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        backgroundColor: '#0A0A0A',
+        padding: 12,
+        borderRadius: 8,
+        marginBottom: 16,
+        borderWidth: 1,
+        borderColor: '#2A2A2A',
+    },
+    balanceInfoLabel: {
+        fontSize: 14,
+        color: '#888888',
+        fontWeight: '600',
+    },
+    balanceInfoValue: {
+        fontSize: 16,
+        color: '#00D9FF',
+        fontWeight: '700',
+    },
+    balanceInfoInsufficient: {
+        color: '#FF4444',
+    },
+});
